@@ -53,11 +53,7 @@ Binary values are stored in Base64. The header is visible but authenticated; the
 
 ### What this version does not do
 
-This module **does not** prove the identity of the person who created a container, support multiple recipients, detect an old valid container being replayed, or protect documents after they have been decrypted. These are separate topics from D1 that we are not implementing in D2. Someone with an encrypted file can try guessing the password offline, so password strength matters. The program is a class project, not a production security product.
-
-### Relation to D1
-
-D1 describes the complete future workflow: a sender protects a document, an attacker may modify it in untrusted storage or transfer, and a recipient must validate it. This D2 implements the encryption and integrity component on a trusted endpoint for **one owner only**, as requested. GCM authentication detects unauthorized ciphertext and metadata changes. D1 features still pending include digital signatures/sender identity, multi-recipient key distribution, recipient authorization, external replay tracking, and key management beyond this password-protected prototype. A valid older encrypted package cannot be detected as a replay without trusted external state. Neither D1 nor this D2 protects fully compromised endpoints.
+This module **does not** prove the identity of the person who created a container, detect an old valid container being replayed, nor protects documents after they have been decrypted since there isn't any data sharing yet. 
 
 ### Sources
 
