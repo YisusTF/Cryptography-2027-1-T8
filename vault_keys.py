@@ -1,10 +1,4 @@
 """D3 - Key management for the Secure Digital Document Vault.
-
-Python 3.10+; only external dependency: pycryptodome.
-Each user owns one RSA key pair. The private key is stored as a
-password-protected PKCS#8 PEM file (scrypt + AES-256-CBC); the public key is
-stored as an X.509 SubjectPublicKeyInfo PEM file.
-The key identifier is the SHA-256 digest of the DER-encoded public key.
 """
 
 import hashlib
