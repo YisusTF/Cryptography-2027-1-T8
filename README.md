@@ -25,8 +25,7 @@ python -m pip install -r requirements.txt
 | `tests/test_vault_keys.py` | D3 key management tests |
 | `tests/test_vault_hybrid.py` | D3 hybrid encryption tests |
 | `docs/HYBRID_DESIGN.md` | D3 design explanation and security decisions |
-| `docs/USER_MANUAL.md` | Step-by-step usage guide |
-| `docs/PR_DESCRIPTION_D3.md` | Pull request description for D3 |
+
 
 ## D3: Hybrid Encryption
 
