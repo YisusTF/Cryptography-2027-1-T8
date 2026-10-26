@@ -1,32 +1,104 @@
 # Cryptography 2027-1 - Team 8
 
-## D2: Secure Symmetric Encryption
+Secure Digital Document Vault: a Python project that encrypts documents so that they can be stored or sent through places we do not trust (see D1 for the full threat model).
 
-For D2, we made the encryption part of our **Secure Digital Document Vault** from D1. The idea is simple: encrypt a document before saving it somewhere else, then recover it later using a password. This version works locally with one owner. File sharing, digital signatures and user accounts can be added in later deliverables.
+| Deliverable | What it adds |
+|---|---|
+| D1 | Architecture and threat model |
+| D2 | Encrypt a file with a password (AES-256-GCM) |
+| **D3** | **Share one encrypted file with several people (hybrid encryption)** |
 
-### How it works
-
-We used Python and the `pycryptodome` library instead of writing AES ourselves.
-
-1. The program generates a new random 256-bit AES key for every file.
-2. It also creates a random 12-byte nonce and encrypts the contents with **AES-256-GCM**.
-3. A separate key is derived from the owner's password with **scrypt** (from PyCryptodome). This key is used with AES Key Wrap to protect the AES file key, so the file key isn't saved in plaintext.
-4. The encrypted file is a JSON container with a header, nonce, ciphertext and authentication tag. The header is authenticated as **AAD**, which means changing its metadata will make decryption fail.
-5. Decryption first checks the password and GCM authentication. The recovered file is only written after these checks pass.
-
-We do not put passwords in files, command arguments or logs. The code also refuses to overwrite an existing output and limits input documents to **10 MiB** so the first version stays manageable.
-
-### How to run it
-
-Requires Python 3.10 or newer.
+Requires Python 3.10 or newer and the `pycryptodome` library.
 
 ```bash
 python -m pip install -r requirements.txt
-python vault_crypto.py encrypt sample_document.txt --out sample_document.sddv
-python vault_crypto.py decrypt sample_document.sddv --out recovered_document.txt
 ```
 
-The program will ask for a password (at least 12 characters). Use the same password to decrypt. For a real document, use a strong and unique passphrase.
+## Project files
+
+| File | Purpose |
+|---|---|
+| `vault_crypto.py` | D2: password-based encryption (unchanged) |
+| `vault_keys.py` | D3: creates and stores RSA key pairs, computes key IDs |
+| `vault_hybrid.py` | D3: multi-recipient encryption and decryption, command line tool |
+| `tests/test_vault_crypto.py` | D2 tests (12) |
+| `tests/test_vault_keys.py` | D3 key management tests |
+| `tests/test_vault_hybrid.py` | D3 hybrid encryption tests |
+| `docs/HYBRID_DESIGN.md` | D3 design explanation and security decisions |
+| `docs/USER_MANUAL.md` | Step-by-step usage guide |
+| `docs/PR_DESCRIPTION_D3.md` | Pull request description for D3 |
+
+## D3: Hybrid Encryption
+
+### What it does
+
+In D2, one person protects a file with one password. In D3, a file is encrypted **once** and can be opened by **several chosen people**. Each person uses their own private key, so nobody needs to share a password. Anyone who is not on the recipient list cannot open the file, even if they get a copy of it.
+
+### How it works
+
+Public-key encryption (RSA) is good for small secrets but cannot handle large files. Symmetric encryption (AES) is fast but needs a shared key. Hybrid encryption uses both:
+
+1. The program creates a new random **file key** (256 bits).
+2. The document is encrypted once with **AES-256-GCM**, the same method used in D2.
+3. The file key is encrypted separately for each recipient with their **public key**, using **RSA-OAEP**.
+4. The container stores the encrypted document and one encrypted copy of the file key per recipient.
+
+To open the file, a recipient finds their own entry, decrypts the file key with their **private key**, and then decrypts the document. RSA only ever touches the small file key, never the document.
+
+### How a recipient finds their key
+
+Every public key has a **key ID**: the SHA-256 hash of the public key, written as 64 hexadecimal characters. The same key always gives the same ID, and two different keys cannot realistically share one. Each recipient entry stores this ID, and decryption looks for the entry whose ID matches the user's key. The readable name (for example `alice`) is only a label.
+
+### What is protected
+
+The recipient list, the key IDs, the encrypted file keys and the algorithm names are all included in the authenticated data (AAD) of AES-GCM. If an attacker adds a recipient, removes one, changes a name or a key ID, or reorders the list, the check fails for everyone and no file is produced. Each encrypted file key is also tied to its recipient and to the container, so it cannot be moved to another container.
+
+### Container format (version 2)
+
+```json
+{
+  "header": { "format": "SDDV", "version": 2, "algorithm": "AES-256-GCM",
+              "key_encryption": "RSA-OAEP-SHA256",
+              "key_id_algorithm": "SHA-256-SPKI-DER", "created_utc": "..." },
+  "recipients": [
+    { "id": "alice", "key_id": "...", "encrypted_key": "..." },
+    { "id": "bob",   "key_id": "...", "encrypted_key": "..." }
+  ],
+  "nonce": "...",
+  "ciphertext": "...",
+  "authentication_tag": "..."
+}
+```
+
+Binary values are stored in Base64. The container is not secret: its contents are either encrypted or authenticated.
+
+### How to run it
+
+Each person creates a key pair once (you will be asked for a passphrase of at least 12 characters that protects the private key):
+
+```bash
+python vault_hybrid.py keygen alice
+python vault_hybrid.py keygen bob
+```
+
+Alice shares only her **public key** (`vault_keys/alice.public.pem`) and Bob does the same. Each person imports the other's public key and checks the key ID with the owner:
+
+```bash
+python vault_hybrid.py import-public bob bob.public.pem
+python vault_hybrid.py fingerprint bob
+```
+
+Encrypt a file for several recipients, then decrypt it as one of them:
+
+```bash
+python vault_hybrid.py encrypt sample_document.txt --to alice --to bob --out shared.sddv
+python vault_hybrid.py decrypt shared.sddv --as bob --out recovered_document.txt
+python vault_hybrid.py inspect shared.sddv
+```
+
+The full guide, including how two separate computers exchange keys, is in `docs/USER_MANUAL.md`.
+
+**Important:** never upload the `vault_keys` folder or any `.private.pem` file to GitHub. They are listed in `.gitignore`.
 
 ### Tests
 
@@ -34,30 +106,47 @@ The program will ask for a password (at least 12 characters). Use the same passw
 python -m unittest discover -s tests -v
 ```
 
-The tests cover all five required D2 scenarios: successful round-trip, wrong password, modified ciphertext, modified metadata and different outputs for repeated encryption. There are also extra checks for invalid JSON, altered nonces/tags, output overwriting, empty files and key-derivation parameters.
+The D3 tests prove the five required cases:
 
-**Why AES-GCM rather than encryption plus a hash?** AEAD verifies ciphertext and associated data using one authenticated design. An unkeyed hash alone could be recomputed by an attacker. Reusing a GCM nonce with the same key can expose relationships between messages and damage authentication security. We generate fresh random keys and nonces for each file.
+| Required case | Test |
+|---|---|
+| File shared with 2 users, both can decrypt | `test_01_...` (and a 3-recipient variant) |
+| Unauthorized user cannot decrypt | `test_02_...` |
+| Tampered recipient list fails | `test_03_...` (label, order, key ID, encrypted key, added entry) |
+| Wrong private key fails | `test_04_...` |
+| Removing a recipient entry breaks access | `test_05_...` |
 
-**Note:** The earlier version used another library. After changing to PyCryptodome, the tests must be run again in an environment where `pycryptodome` can be installed. Do not report a passing result until that run succeeds.
+Extra tests check modified ciphertext, nonce, tag and header, changed algorithm names, repeated encryption, malformed containers, the recipient limit (16), file handling (no overwriting, no output after errors), key files, and the command line. The 12 D2 tests still pass. GitHub Actions runs all tests on every push and pull request.
 
-### Container structure
+### What D3 does not do
 
-The `.sddv` file stores JSON with these fields:
+- It does not prove **who created** a container. Digital signatures are a later step.
+- It does not detect an old valid container being replayed.
+- It cannot confirm that a public key really belongs to the person. Users must compare key IDs through a trusted channel.
+- It cannot take back access from a person who already received a file.
+- It does not protect a computer that is already compromised, or a file after a recipient has decrypted it.
 
-- `header`: format/version, algorithm, scrypt settings, salt, wrapped file key and creation date.
-- `nonce`: random nonce for AES-GCM.
-- `ciphertext`: encrypted document bytes.
-- `authentication_tag`: the GCM integrity tag.
+More details are in `docs/HYBRID_DESIGN.md`.
 
-Binary values are stored in Base64. The header is visible but authenticated; the original filename is not stored. The nonce is also checked during GCM decryption. Reusing a nonce with the **same** GCM key would be dangerous, so we create a new random key and nonce for each encryption.
+## D2: Secure Symmetric Encryption (still available)
 
-### What this version does not do
+`vault_crypto.py` encrypts a file with a password. A random AES-256 file key and a random 12-byte nonce are generated for every file, and the content is encrypted with **AES-256-GCM**. The password goes through **scrypt** to make a key that protects the file key with AES Key Wrap. The JSON header is authenticated as AAD, so changing it makes decryption fail. Files are never overwritten, and the input limit is **10 MiB**.
 
-This module **does not** prove the identity of the person who created a container, detect an old valid container being replayed, nor protects documents after they have been decrypted since there isn't any data sharing yet. 
+```bash
+python vault_crypto.py encrypt sample_document.txt --out sample_document.sddv
+python vault_crypto.py decrypt sample_document.sddv --out recovered_document.txt
+```
 
-### Sources
+D2 containers are version 1 and use `vault_crypto.py`. D3 containers are version 2 and use `vault_hybrid.py`. Each program gives a clear error if it receives the other type.
 
+**Why AES-GCM rather than encryption plus a hash?** AEAD checks the ciphertext and the associated data in one authenticated design. An unkeyed hash can be recomputed by an attacker. Reusing a GCM nonce with the same key breaks its security, so a new random key and nonce are created for every encryption.
+
+## Sources
+
+- [PyCryptodome: RSA](https://www.pycryptodome.org/src/public_key/rsa)
+- [PyCryptodome: RSA OAEP](https://www.pycryptodome.org/src/cipher/oaep)
 - [PyCryptodome: AES authenticated encryption](https://www.pycryptodome.org/src/cipher/aes)
 - [PyCryptodome: AES Key Wrap](https://www.pycryptodome.org/src/cipher/modern#key-wrap-mode)
+- [RFC 8017: PKCS #1 (RSA-OAEP)](https://www.rfc-editor.org/rfc/rfc8017)
 - [NIST SP 800-38D: GCM](https://csrc.nist.gov/pubs/sp/800/38/d/final)
 - [RFC 7914: scrypt](https://www.rfc-editor.org/rfc/rfc7914)
