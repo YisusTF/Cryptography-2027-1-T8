@@ -1,11 +1,4 @@
 """D3 - Hybrid multi-recipient encryption for the Secure Digital Document Vault.
-
-Python 3.10+; only external dependency: pycryptodome.
-The document is encrypted once with AES-256-GCM under a random file key.
-The file key is then encrypted separately for each recipient with RSA-OAEP
-(SHA-256). The recipient list and all algorithm identifiers are authenticated
-as additional authenticated data (AAD).
-Container format version 2; D2 containers (version 1) remain in vault_crypto.py.
 """
 
 import argparse
