@@ -1,1 +1,1 @@
-pycryptodome>=3.20,<4
+pycryptodomex>=3.20,<4
