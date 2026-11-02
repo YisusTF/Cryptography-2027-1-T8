@@ -1,4 +1,5 @@
-"""D3 - Key management for the Secure Digital Document Vault.
+"""D3 - Functions & constants (helper file)
+This file exist just for readeability of the project
 """
 
 import hashlib
@@ -6,15 +7,14 @@ import os
 import re
 from pathlib import Path
 
-from Crypto.PublicKey import RSA
+from Cryptodome.PublicKey import ECC
 
 from vault_crypto import VaultError
 
 
-# ===== Constants =====
-KEY_BITS = 3072
-ALLOWED_KEY_BITS = (2048, 3072, 4096)
-PUBLIC_EXPONENT = 65537
+# Constants 
+CURVE = "Ed25519"
+RAW_KEY_SIZE = 32
 MIN_PASSPHRASE_LENGTH = 12
 MAX_KEY_FILE_SIZE = 64 * 1024
 NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,32}")
@@ -25,7 +25,7 @@ KEY_PROTECTION_PARAMS = {
 }
 
 
-# ===== Validation helpers =====
+#  Validation helpers 
 def validate_name(name):
 	"""Names are restricted so they cannot alter the key file path."""
 	if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
@@ -39,52 +39,65 @@ def _check_passphrase(passphrase):
 
 
 def validate_public_key(key):
-	"""Accept only RSA public keys with an approved size and exponent."""
-	if not isinstance(key, RSA.RsaKey) or key.has_private():
-		raise VaultError("A valid RSA public key is required.")
-	if key.size_in_bits() not in ALLOWED_KEY_BITS or key.e != PUBLIC_EXPONENT:
-		raise VaultError("Unsupported public key: RSA 2048, 3072 or 4096 bits required.")
+	"""Accept only Ed25519 public keys."""
+	if not isinstance(key, ECC.EccKey) or key.has_private():
+		raise VaultError("A valid Ed25519 public key is required.")
+	if key.curve != CURVE:
+		raise VaultError("Unsupported public key: Ed25519 required.")
 	return key
 
 
 def validate_private_key(key):
-	if not isinstance(key, RSA.RsaKey) or not key.has_private():
-		raise VaultError("A valid RSA private key is required.")
-	validate_public_key(key.publickey())
+	if not isinstance(key, ECC.EccKey) or not key.has_private():
+		raise VaultError("A valid Ed25519 private key is required.")
+	validate_public_key(key.public_key())
 	return key
 
 
-# ===== Key generation and identification =====
-def generate_key_pair(bits=KEY_BITS):
-	if bits not in ALLOWED_KEY_BITS:
-		raise VaultError("Key size must be 2048, 3072 or 4096 bits.")
-	return RSA.generate(bits)
+#  Key generation, identification and raw encoding
+def generate_key_pair():
+	"""Random Ed25519 key pair from the OS-backed CSPRNG."""
+	return ECC.generate(curve=CURVE)
 
 
 def public_key_fingerprint(key):
 	"""Key ID: SHA-256 of the DER SubjectPublicKeyInfo, as lowercase hex."""
-	return hashlib.sha256(key.publickey().export_key(format="DER")).hexdigest()
+	return hashlib.sha256(key.public_key().export_key(format="DER")).hexdigest()
 
 
-# ===== PEM import and export =====
+def private_key_bytes(key):
+	"""Raw 32-byte Ed25519 seed, the private-key format eciespy expects."""
+	validate_private_key(key)
+	return key.seed
+
+
+def public_key_bytes(key):
+	"""Raw 32-byte Ed25519 public key, the public-key format eciespy expects."""
+	validate_public_key(key.public_key())
+	return key.public_key().export_key(format="raw")
+
+
+# PEM import and export 
 def export_private_pem(key, passphrase):
 	_check_passphrase(passphrase)
+	validate_private_key(key)
 	return key.export_key(
-		format="PEM", passphrase=passphrase, pkcs=8,
+		format="PEM", passphrase=passphrase,
 		protection=KEY_PROTECTION, prot_params=KEY_PROTECTION_PARAMS
-	)
+	).encode("ascii")
 
 
 def export_public_pem(key):
-	return key.publickey().export_key(format="PEM")
+	return key.public_key().export_key(format="PEM").encode("ascii")
 
 
 def import_private_pem(data, passphrase):
-	if not isinstance(data, bytes) or not data.lstrip().startswith(PRIVATE_PEM_HEADER):
+	if (not isinstance(data, bytes) or len(data) > MAX_KEY_FILE_SIZE
+		or not data.lstrip().startswith(PRIVATE_PEM_HEADER)):
 		raise VaultError("The file is not a password-protected private key.")
 	try:
-		key = RSA.import_key(data, passphrase=passphrase)
-	except (ValueError, IndexError, TypeError):
+		key = ECC.import_key(data, passphrase=passphrase)
+	except (ValueError, IndexError, TypeError, KeyError):
 		raise VaultError("Could not open the private key: wrong passphrase or damaged file.") from None
 	return validate_private_key(key)
 
@@ -93,13 +106,13 @@ def import_public_pem(data):
 	if not isinstance(data, bytes) or len(data) > MAX_KEY_FILE_SIZE:
 		raise VaultError("Invalid public key file.")
 	try:
-		key = RSA.import_key(data)
-	except (ValueError, IndexError, TypeError):
+		key = ECC.import_key(data)
+	except (ValueError, IndexError, TypeError, KeyError):
 		raise VaultError("Invalid public key file.") from None
 	return validate_public_key(key)
 
 
-# ===== File helpers =====
+# File helpers 
 def _write_new(path, data, mode):
 	"""Create a new file exclusively; an existing file is never replaced."""
 	flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
@@ -119,7 +132,7 @@ def _read_key_file(path):
 	return path.read_bytes()
 
 
-# ===== Key store =====
+# Key storing 
 class KeyStore:
 	"""Directory holding <name>.private.pem and <name>.public.pem files."""
 
@@ -129,12 +142,12 @@ class KeyStore:
 	def _path(self, name, kind):
 		return self.directory / f"{validate_name(name)}.{kind}.pem"
 
-	def create_key_pair(self, name, passphrase, bits=KEY_BITS):
+	def create_key_pair(self, name, passphrase):
 		private_path, public_path = self._path(name, "private"), self._path(name, "public")
 		_check_passphrase(passphrase)
 		if private_path.exists() or public_path.exists():
 			raise VaultError(f"A key named '{name}' already exists.")
-		key = generate_key_pair(bits)
+		key = generate_key_pair()
 		private_pem = export_private_pem(key, passphrase)
 		self.directory.mkdir(parents=True, exist_ok=True)
 		_write_new(private_path, private_pem, 0o600)
