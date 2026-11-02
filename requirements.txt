@@ -1,1 +1,2 @@
 pycryptodomex>=3.20,<4
+eciespy>=0.4.7,<0.5
