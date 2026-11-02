@@ -1,14 +1,18 @@
 """D3 - Multi-recipient hybrid encryption for the Secure Digital Document Vault.
-(Run file)
-File content is encrypted by vault_crypto.encrypt_bytes (encryption of content
-lives in vault_crypto.py D2). This module only decides who can open it.
-A random file key, used as the D2 password, is encrypted for every recipient
-with ECIES (Ed25519, AES-256-GCM) via eciespy.
 
-Container :
+File content is encrypted by vault_crypto.encrypt_bytes (D2). This module only
+decides who can open it: a random file key, used as the D2 password, is
+encrypted for every recipient with ECIES (Ed25519, AES-256-GCM) via eciespy.
+
+Container (format version 2):
 	header      public format description
 	recipients  one ECIES-encrypted copy of the file key per recipient
-	payload     D2 container
+	payload     complete D2 container (format version 1)
+
+The header and the ordered recipient list (ids, key IDs and encrypted keys) are
+passed to D2 as additional authenticated data, so adding, removing, reordering
+or relabeling recipients makes decryption fail. inspect shows these fields
+without verifying them, since verification requires a recipient's private key.
 """
 
 import argparse
@@ -56,7 +60,15 @@ AUTH_FAILED = "Authentication failed: wrong key or modified container."
 NO_ENTRY = "Access denied: the container has no entry for the supplied key."
 
 
-#  File key handling 
+# ===== Authenticated data and file key handling =====
+def _canonical_aad(header, recipients):
+	"""Header and ordered recipient list, serialized deterministically for D2."""
+	return b"SDDV|v2|" + json.dumps(
+		{"header": header, "recipients": recipients}, sort_keys=True,
+		separators=(",", ":"), ensure_ascii=True, allow_nan=False
+	).encode("ascii")
+
+
 def _payload_password(file_key):
 	"""The D2 password is the Base64 text of the random file key (44 characters)."""
 	return _b64(file_key)
@@ -80,7 +92,7 @@ def _unwrap_file_key(entry, private_key):
 	return file_key
 
 
-# Container validation 
+# ===== Container validation =====
 def _validate_container(container):
 	"""Reject malformed or unknown structure before any key operation."""
 	if (isinstance(container, dict) and set(container) == V1_OUTER
@@ -116,7 +128,7 @@ def _validate_container(container):
 	return header, recipients, container["payload"]
 
 
-# Encryption and decryption of byte strings
+# ===== Encryption and decryption of byte strings =====
 def hybrid_encrypt_bytes(plaintext, recipients):
 	"""Encrypt once for a list of (id, public_key) pairs; return the container."""
 	if not isinstance(plaintext, bytes):
@@ -145,21 +157,22 @@ def hybrid_encrypt_bytes(plaintext, recipients):
 		}
 		for identifier, key_id, public_key in prepared
 	]
-	return {
-		"header": {
-			"format": "SDDV",
-			"version": FORMAT_VERSION,
-			"key_encryption": KEY_ENCRYPTION,
-			"key_id_algorithm": KEY_ID_ALGORITHM
-		},
-		"recipients": entries,
-		"payload": encrypt_bytes(plaintext, _payload_password(file_key)) # D2 persist
+	header = {
+		"format": "SDDV",
+		"version": FORMAT_VERSION,
+		"key_encryption": KEY_ENCRYPTION,
+		"key_id_algorithm": KEY_ID_ALGORITHM
 	}
+	payload = encrypt_bytes(
+		plaintext, _payload_password(file_key),
+		extra_aad=_canonical_aad(header, entries)
+	)
+	return {"header": header, "recipients": entries, "payload": payload}
 
 
 def hybrid_decrypt_bytes(container, private_key):
 	"""Return plaintext only after the file key is recovered and D2 verifies the payload."""
-	_, recipients, payload = _validate_container(container)
+	header, recipients, payload = _validate_container(container)
 	validate_private_key(private_key)
 	key_id = public_key_fingerprint(private_key)
 	entry = next((item for item in recipients if item["key_id"] == key_id), None)
@@ -167,13 +180,16 @@ def hybrid_decrypt_bytes(container, private_key):
 		raise VaultError(NO_ENTRY)
 	file_key = _unwrap_file_key(entry, private_key)
 	try:
-		return decrypt_bytes(payload, _payload_password(file_key))
+		return decrypt_bytes(
+			payload, _payload_password(file_key),
+			extra_aad=_canonical_aad(header, recipients)
+		)
 	except VaultError:
 		# The payload structure was validated above, so this is an authentication failure.
 		raise VaultError(AUTH_FAILED) from None
 
 
-#  File operations 
+# ===== File operations =====
 def _read_container(path):
 	if path.stat().st_size > MAX_CONTAINER_SIZE:
 		raise VaultError("Encrypted container exceeds the size limit.")
@@ -206,7 +222,10 @@ def hybrid_decrypt_file(input_path, output_path, private_key):
 
 
 def inspect_container(path):
-	"""Return public metadata of a container without any key material."""
+	"""Return public metadata of a container without any key material.
+
+	The values are read from the file as stored and are not authenticated.
+	"""
 	source = Path(path)
 	if not source.is_file():
 		raise VaultError("Input file does not exist.")
@@ -220,7 +239,7 @@ def inspect_container(path):
 	}
 
 
-# CLI Arguments
+# ===== Command line interface =====
 def _prompt_new_passphrase():
 	passphrase = getpass.getpass("New private key passphrase: ")
 	if passphrase != getpass.getpass("Confirm passphrase: "):

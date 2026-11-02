@@ -14,9 +14,9 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from Crypto.Cipher import AES
-from Crypto.Protocol.KDF import scrypt
-from Crypto.Random import get_random_bytes
+from Cryptodome.Cipher import AES
+from Cryptodome.Protocol.KDF import scrypt
+from Cryptodome.Random import get_random_bytes
 
 
 # All parameters below are fixed by format version 1, not controlled by input.
@@ -46,6 +46,19 @@ def _canonical_header(header):
 		header, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
 		allow_nan=False
 	).encode("ascii")
+
+
+def _extra_aad_bytes(extra_aad):
+	"""Caller-supplied data, length-prefixed, authenticated after the header.
+
+	Empty data adds nothing, so containers without extra data keep the exact
+	format-version-1 authentication.
+	"""
+	if not isinstance(extra_aad, bytes):
+		raise VaultError("Additional authenticated data must be bytes.")
+	if not extra_aad:
+		return b""
+	return len(extra_aad).to_bytes(8, "big") + extra_aad
 
 
 def _b64(data):
@@ -101,12 +114,17 @@ def _validate_container(container):
 	return header
 
 
-def encrypt_bytes(plaintext, password):
-	"""Return a JSON-serializable authenticated encrypted container."""
+def encrypt_bytes(plaintext, password, extra_aad=b""):
+	"""Return a JSON-serializable authenticated encrypted container.
+
+	extra_aad is optional caller data (bytes) that is authenticated together
+	with the header but not stored; the same bytes are required to decrypt.
+	"""
 	if not isinstance(plaintext, bytes):
 		raise VaultError("Input content must be bytes.")
 	if len(plaintext) > MAX_FILE_SIZE:
 		raise VaultError("Input file exceeds the 10 MiB limit.")
+	extra = _extra_aad_bytes(extra_aad)
 	# Generate all secrets/nonces from the OS-backed CSPRNG; never seed manually.
 	dek = get_random_bytes(KEY_SIZE)
 	salt = get_random_bytes(SALT_SIZE)
@@ -125,6 +143,8 @@ def encrypt_bytes(plaintext, password):
 	}
 	cipher = AES.new(dek, AES.MODE_GCM, nonce=nonce, mac_len=TAG_SIZE)
 	cipher.update(_canonical_header(header))
+	if extra:
+		cipher.update(extra)
 	ciphertext, tag = cipher.encrypt_and_digest(plaintext)
 	return {
 		"header": header,
@@ -134,9 +154,10 @@ def encrypt_bytes(plaintext, password):
 	}
 
 
-def decrypt_bytes(container, password):
+def decrypt_bytes(container, password, extra_aad=b""):
 	"""Only returns plaintext after key unwrap and AEAD tag verification succeed."""
 	header = _validate_container(container)
+	extra = _extra_aad_bytes(extra_aad)
 	kek = _derive_key(password, _unb64(header["salt"], "salt", SALT_SIZE))
 	try:
 		dek = AES.new(kek, AES.MODE_KW).unseal(
@@ -145,6 +166,8 @@ def decrypt_bytes(container, password):
 		cipher = AES.new(dek, AES.MODE_GCM,
 			nonce=_unb64(container["nonce"], "nonce", NONCE_SIZE), mac_len=TAG_SIZE)
 		cipher.update(_canonical_header(header))
+		if extra:
+			cipher.update(extra)
 		return cipher.decrypt_and_verify(
 			_unb64(container["ciphertext"], "ciphertext"),
 			_unb64(container["authentication_tag"], "authentication_tag", TAG_SIZE)
