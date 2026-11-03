@@ -10,6 +10,7 @@ so the sender is not authenticated (see [Limitations](#limitations)).
 
 ## Project structure
 
+
 | File | Purpose |
 |---|---|
 | `vault_crypto.py` | D2: password-based AES-256-GCM encryption of a file (single owner). |
