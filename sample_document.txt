@@ -1,0 +1,3 @@
+Secure Digital Document Vault - D2 demonstration document.
+This is a synthetic example file and does not contain private information.
+Encryption and decryption must recover exactly these bytes.
