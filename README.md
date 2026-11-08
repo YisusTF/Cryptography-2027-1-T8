@@ -1,187 +1,209 @@
 # Secure Digital Document Vault
 
-A command-line tool to encrypt files and share them with several recipients.
-It provides **confidentiality** (only the chosen recipients can read a file),
-**integrity** (any modification of the container is detected) and **access
-control** (you decide who the file is shared with).
+A Python command-line tool for encrypting documents, sharing them with selected
+recipients and verifying the sender with digital signatures.
 
-It does **not** prove who created a file: there are no digital signatures yet,
-so the sender is not authenticated (see [Limitations](#limitations)).
-
-## Project structure
-
-
-| File | Purpose |
+| Deliverable | Function |
 |---|---|
-| `vault_crypto.py` | D2: password-based AES-256-GCM encryption of a file (single owner). |
-| `vault_keys.py` | D3: Ed25519 key pairs, PEM storage, key IDs, `KeyStore`. |
-| `vault_hybrid.py` | D3: multi-recipient hybrid encryption and the command-line interface. |
-| `tests/` | Unit tests (`unittest`, run with `pytest`). |
+| D2 | Password-based encryption with AES-256-GCM |
+| D3 | Multi-recipient access with ECIES and Ed25519 keys |
+| D5 | Sender authentication with Ed25519ph signatures |
 
 ## Installation
 
-Python 3.10 or newer (CI runs on 3.12).
+Python 3.10 or newer is required.
 
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-`requirements.txt`:
-
-```
-pycryptodomex>=3.20,<4
-eciespy>=0.4.7,<0.5
-```
+On Windows, activate the environment with `.venv\Scripts\activate`.
+D5 uses PyCryptodomex, already required by D3, for signatures. No new dependency
+is needed.
 
 ## Usage
 
-All commands are run as `python vault_hybrid.py <command> ...`. Options such as
-`--keys-dir` go after the command. Keys are stored in `vault_keys/` by default.
+Use `vault_signed.py` for D5. All commands below run from the project directory.
+Private key passphrases must contain at least 12 characters.
 
-**1. Create your key pair** (asks for a passphrase of at least 12 characters):
-
-```bash
-python vault_hybrid.py keygen alice
-```
-
-**2. Register another person's public key** and verify its Key ID with them
-through a separate trusted channel (phone call, in person):
+Create the sender's and recipient's keys:
 
 ```bash
-python vault_hybrid.py import-public bob path/to/bob.public.pem
-python vault_hybrid.py list-keys
-python vault_hybrid.py fingerprint bob
+python vault_signed.py keygen alice
+python vault_signed.py keygen bob
+python vault_signed.py list-keys
+python vault_signed.py fingerprint alice
 ```
 
-**3. Encrypt a file for one or more recipients** (repeat `--to`, up to 16;
-include yourself if you want to be able to open it). The output must be a new file:
+When working on separate computers, exchange only public PEM files. Import the
+other person's public key and confirm its fingerprint with the owner through a
+trusted channel before using it:
 
 ```bash
-python vault_hybrid.py encrypt report.pdf --to alice --to bob --out report.sddv
+python vault_signed.py import-public alice path/to/alice.public.pem
+python vault_signed.py fingerprint alice
 ```
 
-**4. Inspect a container** (no key needed; the values shown are not verified):
+The sender needs the recipient's public key; the recipient needs the sender's
+public key. Each person keeps their own private key. Use `--keys-dir DIRECTORY`
+after a command to choose a separate key directory for each user.
+
+Encrypt for Bob and sign as Alice (asks for Alice's private key passphrase):
 
 ```bash
-python vault_hybrid.py inspect report.sddv
+python vault_signed.py encrypt sample_document.txt --to bob --signer alice --out signed_document.sddv
 ```
 
-**5. Decrypt as a recipient** (`--as` is the name of your own key pair; asks for
-your passphrase):
+Repeat `--to NAME` to add recipients, up to 16. Include Alice with `--to alice`
+if she should also be able to decrypt the document.
+
+Verify Alice's signature and inspect the recipient list without decrypting:
 
 ```bash
-python vault_hybrid.py decrypt report.sddv --as bob --out report_recovered.pdf
+python vault_signed.py inspect signed_document.sddv --signer alice
 ```
 
-To simulate several users on one computer, give each one its own directory:
+Verify Alice's signature, then decrypt as Bob:
 
 ```bash
-python vault_hybrid.py keygen alice --keys-dir keys_alice
-python vault_hybrid.py keygen bob --keys-dir keys_bob
-python vault_hybrid.py import-public bob keys_bob/bob.public.pem --keys-dir keys_alice
-python vault_hybrid.py encrypt doc.pdf --to bob --out doc.sddv --keys-dir keys_alice
-python vault_hybrid.py decrypt doc.sddv --as bob --out doc_out.pdf --keys-dir keys_bob
+python vault_signed.py decrypt signed_document.sddv --as bob --signer alice --out recovered_document.txt
 ```
 
-The single-owner mode (D2, one shared password) is also available on its own:
+`--signer alice` selects the public key the recipient already trusts as Alice's.
+The container cannot choose a replacement verification key. Verification happens
+before the recipient is asked for their private key passphrase. A rejected
+container produces an error and no recovered document. Existing output files
+are never overwritten. The input file limit remains 10 MiB.
+
+## Signature design
+
+D5 follows **Encrypt → Add metadata → Hash → Sign → Store**.
+
+The signature algorithm is **Ed25519ph**, the prehash variant of Ed25519 defined
+in RFC 8032. The code passes a SHA-512 hash object to PyCryptodomex's EdDSA API,
+which performs the standard Ed25519ph operation. Verification uses the same
+algorithm. This is one fixed algorithm, with no algorithm selection from input.
+
+The signed message is the ASCII encoding of JSON with sorted object keys,
+compact separators and ASCII escapes. Recipient array order is preserved.
+The prefix `SDDV|v3|signature|` identifies the signing context. The SHA-512 hash
+covers every top-level field except `signature`:
+
+- `metadata`: D5 format, version and signature algorithm.
+- `header`: the original D3 format and algorithm identifiers.
+- `recipients`: the complete ordered list of labels, key IDs and encrypted keys.
+- `payload`: the complete D2 output, including its header, ciphertext, nonce
+  and authentication tag.
+- `signer_id`: SHA-256 of the signer's DER SubjectPublicKeyInfo public key,
+  represented by 64 lowercase hexadecimal characters.
+
+The raw 64-byte signature is stored as standard Base64. A version 3 signed
+container keeps the D3 structure and adds three fields:
+
+```text
+{
+  metadata: {format: SDDV, version: 3, signature_algorithm: Ed25519ph-SHA512},
+  header: <D3 header, version 2>,
+  recipients: <D3 recipient list>,
+  payload: <complete D2 container: header, nonce, ciphertext, authentication_tag>,
+  signer_id: <sender public key fingerprint>,
+  signature: <Base64 signature>
+}
+```
+
+The ciphertext and tag remain inside `payload`, preserving the existing D2/D3
+implementation. The outer version is 3; the embedded D3 header remains version 2.
+Whitespace and JSON object key order do not change the signed data. Any change
+to a signed value, addition/removal of a field, or recipient reordering is
+rejected. Duplicate JSON keys are rejected when reading the file.
+
+### Why hash before signing?
+
+SHA-512 represents the complete signed message with a fixed-size, collision
+resistant digest. Ed25519ph defines how this prehash is signed, so verification
+requires exactly the same signed content. The hash alone cannot authenticate
+the sender: the private-key signature supplies authentication.
+
+### Why sign ciphertext instead of plaintext?
+
+A recipient can verify the encrypted package before decrypting it. The signature
+binds the exact encrypted content and metadata without needing plaintext or a
+recipient's private key. AES-GCM still authenticates the decrypted payload.
+
+### What if verification is skipped or delayed?
+
+An attacker could supply a container encrypted by someone else and claim it came
+from Alice. Decrypting first could process or expose unauthenticated content.
+D5 verifies the expected sender's signature before calling D3 decryption.
+
+### What if metadata is excluded?
+
+A signature over ciphertext alone would not authenticate recipient identities,
+algorithm identifiers or other context. D5 signs all D3 AAD fields and the
+complete D2 payload, plus the D5 metadata and signer fingerprint.
+
+### Limits
+
+A fingerprint proves identity only after the public key has been authenticated
+through a trusted channel. A stolen private key can be used to forge signatures.
+D5 does not implement replay detection, key revocation or protection against a
+compromised computer. It reuses D3's existing Ed25519 key pairs for this classroom
+extension; a production system should separate signing and encryption keys.
+
+`vault_crypto.py` and `vault_hybrid.py` remain available for the earlier
+assignments. They do not provide D5 sender authentication. D5 rejects unsigned
+D2/D3 containers rather than silently falling back to unsigned decryption.
+
+## Tests
+
+Run all tests, including the existing D3 tests:
 
 ```bash
-python vault_crypto.py encrypt report.pdf --out report.v1.json
-python vault_crypto.py decrypt report.v1.json --out report_recovered.pdf
+python -m unittest discover -s tests -v
 ```
 
-Limits: files up to 10 MiB, 1 to 16 recipients, existing files are never overwritten.
-
-## Running the tests
+Run only the signature tests:
 
 ```bash
-python -m pytest tests/ -v
+python -m unittest discover -s tests -p test_vault_signed.py -v
 ```
 
-## Hybrid Design Explanation
+Each D5 test prints a description of the acceptance or rejection being checked;
+`ok` confirms the expected result. Negative tests pass when the attack is rejected.
+D5 tests are separated by a blank line. The five required tests are displayed as
+`REQUIRED_TEST_01` through `REQUIRED_TEST_05`; their method names remain unchanged.
 
-### Container layout
-
-```
-container (format version 2)
-├─ header      format, version, algorithm identifiers
-├─ recipients  one entry per recipient: id, key_id, encrypted_key
-└─ payload     a complete D2 container (the encrypted file)
-```
-
-### Why hybrid encryption is used
-
-Sharing a file with several people needs two things that no single kind of
-cipher gives well. Asymmetric cryptography lets each person have their own
-key pair, so nobody has to share a secret in advance. Symmetric cryptography
-encrypts large files quickly. The hybrid design uses each for what it does best:
-
-1. A random **file key** (256 bits) is generated for every file.
-2. The file is encrypted once, with the file key (through D2).
-3. The file key is encrypted separately for each recipient with their public key.
-
-### Why symmetric encryption is still needed
-
-Public-key encryption (ECIES here) is meant for small values such as keys. It
-is slower than AES and, applied to the whole file once per recipient, would
-multiply the container size by the number of recipients. AES-256-GCM encrypts
-and authenticates the file in a single pass, so the document is stored **once**
-no matter how many people can open it. D2 encrypts it with a fresh data key
-that is wrapped with a key derived by scrypt; in D3 the password given to D2 is
-the Base64 of the random file key, never something a person chooses.
-
-### Why per-recipient key encryption is required
-
-Each recipient needs their own way to recover the file key:
-
-- With one shared password, everyone would hold the same secret, which must
-  travel through some channel and cannot be tied to a person.
-- With one entry per recipient, only the matching private key opens that entry.
-  Giving access to someone new requires no secret to be sent.
-- Every entry uses a fresh ephemeral key (ECIES), so two entries for the same
-  file key look unrelated.
-
-## Security Decisions
-
-### How do recipients identify their key?
-
-Every recipient has a **Key ID**: the SHA-256 of the public key in DER
-(SubjectPublicKeyInfo) format, in lowercase hex. It is stored in the
-`key_id` field of each entry. To decrypt, the program computes the Key ID of
-your private key and looks for the entry with that value. If there is none, it
-stops with `Access denied: the container has no entry for the supplied key.`
-before any decryption is attempted. Key IDs are public and are also printed by
-`keygen`, `fingerprint`, `encrypt` and `inspect`.
-
-### What happens if an attacker modifies the recipient list?
-
-The container header and the ordered recipient list (each `id`, `key_id` and
-`encrypted_key`) are passed to D2 as **additional authenticated data (AAD)**,
-so they are covered by the AES-GCM authentication tag of the file. Any change
-makes decryption fail with `Authentication failed: wrong key or modified
-container.` and no output file is created:
-
-| Attack | Result |
+| Required case | Test |
 |---|---|
-| Add a recipient | Detected, decryption fails for everyone. |
-| Remove a recipient | The removed user gets "no entry"; the remaining users fail authentication. |
-| Reorder entries | Detected. |
-| Change an `id` or swap identities | Detected. |
-| Swap `key_id` values or alter an `encrypted_key` | Detected. |
+| Valid signature accepted | `test_01_valid_signature_is_accepted` |
+| Modified ciphertext rejected | `test_02_modified_ciphertext_is_rejected` |
+| Modified metadata rejected | `test_03_modified_metadata_is_rejected` |
+| Wrong public key rejected | `test_04_wrong_public_key_is_rejected` |
+| Missing signature rejected | `test_05_removed_signature_is_rejected` |
 
-An attacker who adds an entry could not grant access to anyone anyway, because
-the file key can only be recovered with a recipient's private key. The
-`inspect` command reads the file as stored and does **not** verify it.
+Additional tests check forgery, unsigned containers, verification before
+decryption, absence of plaintext after failure, file round trips, overwrite
+protection and CLI behavior. GitHub Actions runs the suite on pushes and pull
+requests.
 
-### What happens if the public key is wrong?
+## Files
 
-- **Malformed or unsupported key** (not Ed25519, a private key, corrupted
-  file): rejected when imported.
-- **Valid key that belongs to someone else** (for example, replaced by an
-  attacker): the program cannot tell. The file is encrypted for whoever holds
-  that key, and the intended recipient receives "no entry". There is no
-  certificate authority, so this is why `import-public` prints the Key ID and
-  asks you to **verify it with the key owner through another channel**.
-- **Entry that was not encrypted for the key it claims** (`key_id` matches but
-  the content was made for another key): decryption fails with the
-  authentication error.
+| File | Purpose |
+|---|---|
+| `vault_crypto.py` | Existing D2 symmetric encryption |
+| `vault_keys.py` | Existing D3 Ed25519 key management |
+| `vault_hybrid.py` | Existing D3 multi-recipient encryption |
+| `vault_signed.py` | D5 signatures, verification and command-line interface |
+| `tests/test_vault_signed.py` | D5 tests |
+| `tests/test_vault_keys.py`, `tests/test_vault_hybrid.py` | Existing D3 tests |
+| `requirements.txt` | Existing dependencies |
+| `.github/workflows/python-tests.yml` | Automated tests |
+
+Never upload private keys, virtual environments or decrypted documents.
+
+## References
+
+- [RFC 8032: Ed25519 and Ed25519ph](https://www.rfc-editor.org/rfc/rfc8032)
+- [PyCryptodome: EdDSA](https://www.pycryptodome.org/src/signature/eddsa)
