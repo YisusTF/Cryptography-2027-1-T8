@@ -8,6 +8,7 @@ recipients and verifying the sender with digital signatures.
 | D2 | Password-based encryption with AES-256-GCM |
 | D3 | Multi-recipient access with ECIES and Ed25519 keys |
 | D5 | Sender authentication with Ed25519ph signatures |
+| D6 | Password-protected key storage, secure backup/recovery and key lifecycle |
 
 ## Installation
 
@@ -23,9 +24,13 @@ On Windows, activate the environment with `.venv\Scripts\activate`.
 D5 uses PyCryptodomex, already required by D3, for signatures. No new dependency
 is needed.
 
+D6 also uses the existing dependencies. New private keys use scrypt and
+authenticated AES-256-GCM protection; older D3/D5 encrypted PEM files remain
+readable. See [D6 Key Management Design](docs/D6_Key_Management.md).
+
 ## Usage
 
-Use `vault_signed.py` for D5. All commands below run from the project directory.
+Use `vault_signed.py` for D5 and D6. All commands below run from the project directory.
 Private key passphrases must contain at least 12 characters.
 
 Create the sender's and recipient's keys:
@@ -76,6 +81,27 @@ The container cannot choose a replacement verification key. Verification happens
 before the recipient is asked for their private key passphrase. A rejected
 container produces an error and no recovered document. Existing output files
 are never overwritten. The input file limit remains 10 MiB.
+
+### D6: backup and recovery of private keys
+
+Back up the **encrypted** private key without decrypting it:
+
+```bash
+python vault_signed.py backup-key alice --out alice-backup.private.pem
+```
+
+To demonstrate recovery, restore into a separate directory instead of
+removing an active key (the command asks for the backup's passphrase):
+
+```bash
+python vault_signed.py restore-key alice alice-backup.private.pem --keys-dir restored_keys
+python vault_signed.py fingerprint alice --keys-dir restored_keys
+```
+
+Confirm the fingerprint matches the original key. Never upload the private-key
+backup or store its password. Recovery does not overwrite an existing private
+key. The D6 design document explains rotation, compromise response, keystore
+format, security limits and the D1 threat-model assumptions.
 
 ## Signature design
 
@@ -170,6 +196,12 @@ Run only the signature tests:
 python -m unittest discover -s tests -p test_vault_signed.py -v
 ```
 
+Run only the D6 key-management acceptance tests:
+
+```bash
+python -m unittest discover -s tests -p test_vault_key_management.py -v
+```
+
 Each D5 test prints a description of the acceptance or rejection being checked;
 `ok` confirms the expected result. Negative tests pass when the attack is rejected.
 D5 tests are separated by a blank line. The five required tests are displayed as
@@ -198,6 +230,8 @@ requests.
 | `vault_signed.py` | D5 signatures, verification and command-line interface |
 | `tests/test_vault_signed.py` | D5 tests |
 | `tests/test_vault_keys.py`, `tests/test_vault_hybrid.py` | Existing D3 tests |
+| `tests/test_vault_key_management.py` | D6 protection, tampering and recovery tests |
+| `docs/D6_Key_Management.md` | D6 keystore design, lifecycle and threat-model discussion |
 | `requirements.txt` | Existing dependencies |
 | `.github/workflows/python-tests.yml` | Automated tests |
 
