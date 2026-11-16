@@ -19,7 +19,9 @@ MIN_PASSPHRASE_LENGTH = 12
 MAX_KEY_FILE_SIZE = 64 * 1024
 NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,32}")
 PRIVATE_PEM_HEADER = b"-----BEGIN ENCRYPTED PRIVATE KEY-----"
-KEY_PROTECTION = "scryptAndAES256-CBC"
+# D6: authenticated encryption protects new private-key files against tampering.
+# Existing D3/D5 AES-CBC PEM files remain readable and can be restored as GCM.
+KEY_PROTECTION = "scryptAndAES256-GCM"
 KEY_PROTECTION_PARAMS = {
 	"iteration_count": 2**15, "salt_size": 16, "block_size": 8, "parallelization": 1
 }
@@ -162,7 +164,43 @@ class KeyStore:
 		return import_public_pem(_read_key_file(self._path(name, "public")))
 
 	def load_private(self, name, passphrase):
-		return import_private_pem(_read_key_file(self._path(name, "private")), passphrase)
+		key = import_private_pem(_read_key_file(self._path(name, "private")), passphrase)
+		public = self.load_public(name)
+		if public_key_fingerprint(key) != public_key_fingerprint(public):
+			raise VaultError("Private and public key identities do not match.")
+		return key
+
+	def backup_private(self, name, output_path):
+		"""Copy only the encrypted private PEM, never plaintext key material."""
+		data = _read_key_file(self._path(name, "private"))
+		if not data.lstrip().startswith(PRIVATE_PEM_HEADER):
+			raise VaultError("The private key is not encrypted.")
+		_write_new(Path(output_path), data, 0o600)
+		return Path(output_path)
+
+	def restore_private(self, name, backup_path, passphrase):
+		"""Restore a protected private key, keeping its public identity consistent."""
+		private_path, public_path = self._path(name, "private"), self._path(name, "public")
+		if private_path.exists() or private_path.is_symlink():
+			raise VaultError(f"A private key named '{name}' already exists.")
+		key = import_private_pem(_read_key_file(Path(backup_path)), passphrase)
+		fingerprint = public_key_fingerprint(key)
+		if public_path.exists():
+			if public_key_fingerprint(self.load_public(name)) != fingerprint:
+				raise VaultError("Backup key does not match the stored public key.")
+		elif public_path.is_symlink():
+			raise VaultError("Invalid public key path.")
+		# Convert legacy AES-CBC backups into authenticated AES-GCM on restore.
+		protected = export_private_pem(key, passphrase)
+		self.directory.mkdir(parents=True, exist_ok=True)
+		_write_new(private_path, protected, 0o600)
+		try:
+			if not public_path.exists():
+				_write_new(public_path, export_public_pem(key) + b"\n", 0o644)
+		except Exception:
+			private_path.unlink(missing_ok=True)
+			raise
+		return fingerprint
 
 	def import_public(self, name, pem_data):
 		"""Register another user's public key after validating it."""

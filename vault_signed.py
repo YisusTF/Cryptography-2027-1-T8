@@ -89,16 +89,18 @@ def signed_decrypt_file(input_path, output_path, recipient_private_key, sender_p
 
 # >>>>>>>>>> Command line interface <<<<<<<<<<
 def _build_parser():
-    parser = argparse.ArgumentParser(description="Signed multi-recipient document vault (D5)")
+    parser = argparse.ArgumentParser(description="Signed multi-recipient document vault (D5/D6)")
     sub = parser.add_subparsers(dest="command", required=True)
     for command in ("keygen", "list-keys", "fingerprint", "import-public",
-                    "encrypt", "decrypt", "inspect"):
+                    "encrypt", "decrypt", "inspect", "backup-key", "restore-key"):
         item = sub.add_parser(command)
         item.add_argument("--keys-dir", default=hybrid.DEFAULT_KEYS_DIR)
-        if command in ("keygen", "fingerprint", "import-public"):
+        if command in ("keygen", "fingerprint", "import-public", "backup-key", "restore-key"):
             item.add_argument("name")
-        if command == "import-public":
+        if command in ("import-public", "restore-key"):
             item.add_argument("file")
+        if command == "backup-key":
+            item.add_argument("--out", required=True)
         if command in ("encrypt", "decrypt", "inspect"):
             item.add_argument("input")
             item.add_argument("--signer", required=True, help="Expected sender's stored key name")
@@ -112,6 +114,15 @@ def _build_parser():
 
 
 def _run(args):
+    if args.command in ("backup-key", "restore-key"):
+        store = KeyStore(args.keys_dir)
+        if args.command == "backup-key":
+            print(f"Encrypted key backup saved to: {store.backup_private(args.name, args.out)}")
+        else:
+            password = getpass.getpass("Backup private key passphrase: ")
+            fingerprint = store.restore_private(args.name, args.file, password)
+            print(f"Restored '{args.name}' | Key ID: {fingerprint}")
+        return
     if args.command not in ("encrypt", "decrypt", "inspect"):
         hybrid._run(args)
         return
